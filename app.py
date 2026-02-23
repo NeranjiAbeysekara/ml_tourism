@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+import shap
+import matplotlib.pyplot as plt
 from PIL import Image
 
 # Set page configuration
@@ -13,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Boutique Aesthetic
+# Custom CSS 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Inter:wght@300;400;600&display=swap');
@@ -156,8 +158,8 @@ with st.sidebar:
     st.markdown("---")
     st.info("Accuracy is higher when using precise GPS coordinates.")
 
-# Prediction Logic
-def make_prediction():
+# Prediction & Explanation Logic
+def make_prediction_with_explanation():
     if model and encoder:
         # Prepare input data
         input_df = pd.DataFrame([{
@@ -172,19 +174,41 @@ def make_prediction():
         input_enc = input_df.copy()
         input_enc[['Type', 'District']] = encoder.transform(input_df[['Type', 'District']]).astype(int)
         
-        # Predict
+        # 1. Standard Prediction
         prediction = model.predict(input_enc)[0]
+        if isinstance(prediction, (np.ndarray, list)):
+            prediction = prediction[0]
+            
         probs = model.predict_proba(input_enc)[0]
         classes = model.classes_
         
-        return prediction, dict(zip(classes, probs))
-    return None, None
+        # 2. XAI: SHAP Explanation
+        
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(input_enc)
+        
+        # Handle multiclass SHAP (returns a list of arrays)
+        
+        class_idx = list(classes).index(prediction)
+        
+        # In multiclass, shap_values is typically a list of arrays [one for each class]
+        if isinstance(shap_values, list):
+            current_shap = shap_values[class_idx][0]
+        else:
+            # For some configurations or binary cases
+            if len(shap_values.shape) == 3: # (samples, features, classes)
+                current_shap = shap_values[0, :, class_idx]
+            else:
+                current_shap = shap_values[0]
+            
+        return prediction, dict(zip(classes, probs)), current_shap, input_enc.columns
+    return None, None, None, None
 
 # --- Main UI ---
 st.markdown("""
     <div class="hero-section">
         <h1>Boutique Intelligence</h1>
-        <p>Advanced classification for Sri Lanka's premium accommodation sector. Leveraging CatBoost machine learning to predict industry grades with precision.</p>
+        <p>Expert grade prediction for Sri Lanka's premium accommodation sector. Using advanced data models to ensure industry standards are met with precision.</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -195,27 +219,53 @@ with col1:
     st.markdown(f"Evaluating a **{selected_type}** in **{selected_district}** with **{num_rooms}** rooms.")
     
     if st.button("EXECUTE PREDICTION"):
-        pred, probabilities = make_prediction()
+        pred, probabilities, shap_vals, feature_names = make_prediction_with_explanation()
         
         if pred and probabilities:
             st.markdown(f"""
                 <div class="prediction-card">
-                    <p style="text-transform: uppercase; letter-spacing: 2px; color: #666; font-weight: 600; margin-bottom: 0.5rem;">Predicted Classification</p>
+                    <p style="text-transform: uppercase; letter-spacing: 2px; color: #666; font-weight: 600; margin-bottom: 0.5rem;">Recommended Industry Grade</p>
                     <h1 style="margin: 0; color: #D4AF37; font-size: 3rem;">{pred}</h1>
                     <p style="margin-top: 1rem; color: #555; line-height: 1.6;">
-                        Based on the current parameters, this property aligns most closely with the <b>{pred}</b> industry standards. 
-                        The model evaluates spatial positioning, scale, and operational type to determine this classification.
+                        Our analysis suggests this property aligns most closely with the <b>{pred}</b> standard. 
+                        The explanation below shows which features of your property were most important in determining this.
                     </p>
                 </div>
             """, unsafe_allow_html=True)
+
+            # --- PREDICTION EXPLANATION ---
+            st.markdown("### Key Factors in this Prediction")
             
-            st.markdown("#### Confidence Breakdown")
+            #simple bar chart for labels
+            shap_df = pd.DataFrame({
+                'Property Feature': feature_names,
+                'Influence': shap_vals
+            }).sort_values('Influence', ascending=True)
+            
+            fig, ax = plt.subplots(figsize=(8, 4))
+            #  Gold for supporting factors, Slate for reducing factors
+            colors = ['#D4AF37' if x > 0 else '#718096' for x in shap_df['Influence']]
+            ax.barh(shap_df['Property Feature'], shap_df['Influence'], color=colors)
+            ax.axvline(x=0, color='black', linewidth=0.8)
+            ax.set_title(f"Factors supporting the '{pred}' category", fontsize=10, family='sans-serif')
+            ax.set_xlabel("Degree of Influence")
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            with st.expander("How to read this chart?"):
+                st.write("""
+                    **Gold bars** show features that strongly support this grade (like high room count or prime location). 
+                    **Grey bars** show features that might suggest a different category. 
+                    The longer the bar, the more important that feature was for this result.
+                """)
+            
+            st.markdown("#### Comparison with Other Grades")
             # Show probabilities as progress bars
             for cls, prob in probabilities.items():
-                st.write(f"{cls}")
+                st.write(f"**{cls}** Match: {prob*100:.1f}%")
                 st.progress(float(prob))
         else:
-            st.error("Prediction failed or Model not found. Please ensure 'tourism_model_package.pkl' exists.")
+            st.error("Prediction failed. Please ensure 'tourism_model_package.pkl' exists and is compatible.")
 
 with col2:
     st.markdown("### Historical Insights")
